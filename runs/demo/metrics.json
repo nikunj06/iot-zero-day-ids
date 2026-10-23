@@ -1,0 +1,20 @@
+{
+  "n_test": 440,
+  "known_macro_f1": 0.9312839059674504,
+  "benign_false_alarm_rate": 0.0,
+  "unknown_recall": 0.2875,
+  "type_a_unknown_recall": 0.575,
+  "type_a_n": 160,
+  "type_b_unknown_recall": 0.0,
+  "type_b_n": 160,
+  "n_detected_heldout": 92,
+  "hierarchical_accuracy_on_detected_unknown": 1.0,
+  "threshold": 0.5,
+  "family_threshold": 0.5,
+  "n_train": 320,
+  "n_validation": 200,
+  "n_aux_train": 80,
+  "note": "Synthetic input does not establish real-world attack detection.",
+  "clustered_unknown_flows": 93,
+  "cluster_homogeneity_on_labeled_test": 1.0
+}

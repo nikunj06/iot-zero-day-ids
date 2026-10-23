@@ -1,0 +1,36 @@
+{
+  "classes": [
+    "DoS-SYN",
+    "Recon-Scan",
+    "benign"
+  ],
+  "families": [
+    "DoS",
+    "Recon"
+  ],
+  "aux": [
+    "Spoof-ARP"
+  ],
+  "heldout": [
+    "DoS-HTTP",
+    "Mirai-Bot"
+  ],
+  "categories": {
+    "DoS-HTTP": "type_b",
+    "Mirai-Bot": "type_a"
+  },
+  "branch": "both",
+  "graph": true,
+  "payload_len": 128,
+  "batch_size": 64,
+  "seed": 42,
+  "features": [
+    "duration",
+    "packets",
+    "bytes",
+    "mean_size",
+    "iat_mean",
+    "tcp_syn",
+    "dst_port"
+  ]
+}
