@@ -3,5 +3,6 @@ pandas>=2.2,<3
 scikit-learn>=1.4,<2
 torch>=2.3,<3
 torch-geometric>=2.5,<3
-streamlit>=1.40,<2
+streamlit>=1.51,<2
+altair>=5,<7
 dpkt>=1.9.8,<2

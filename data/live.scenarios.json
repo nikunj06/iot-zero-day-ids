@@ -1,0 +1,11 @@
+{
+  "capture_id": "live-local-1793614591",
+  "source": "local application telemetry",
+  "note": "packets field is a message-count proxy, not a PCAP packet count; scenario counts are not ground-truth attack labels",
+  "scenario_counts": {
+    "normal": 53,
+    "burst": 10,
+    "unusual_command": 13
+  },
+  "completed_flows": 76
+}

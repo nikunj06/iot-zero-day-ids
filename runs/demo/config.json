@@ -32,5 +32,7 @@
     "iat_mean",
     "tcp_syn",
     "dst_port"
-  ]
+  ],
+  "feature_source": "synthetic_flow_v1",
+  "decision": "hybrid"
 }

@@ -4,7 +4,7 @@ import csv
 import json
 from pathlib import Path
 
-from .data import read_jsonl, save_jsonl
+from .data import feature_source, read_jsonl, save_jsonl
 
 
 def main():
@@ -16,6 +16,11 @@ def main():
     args = parser.parse_args()
     base = read_jsonl(args.base)
     fresh = [json.loads(s) for s in Path(args.new).read_text().splitlines() if s.strip()]
+    if not fresh or feature_source(fresh) != feature_source(base):
+        parser.error("fresh observations must have the same feature_source as the base training data")
+    fresh_ids = [r["flow_id"] for r in fresh]
+    if len(fresh_ids) != len(set(fresh_ids)) or set(fresh_ids) & {r["flow_id"] for r in base}:
+        parser.error("fresh flow IDs must be unique and distinct from original IDs")
     base_caps = {r["capture_id"] for r in base}
     if any(r["capture_id"] in base_caps for r in fresh):
         parser.error("new captures overlap original captures; evaluation would be contaminated")

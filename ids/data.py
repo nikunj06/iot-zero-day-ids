@@ -8,6 +8,14 @@ from sklearn.preprocessing import StandardScaler
 
 
 FEATURES = ("duration", "packets", "bytes", "mean_size", "iat_mean", "tcp_syn", "dst_port")
+SOURCES = {"synthetic_flow_v1", "pcap_packet_v1", "app_message_v1", "iot23_zeek_v1"}
+
+
+def feature_source(rows):
+    sources = {r.get("feature_source") for r in rows}
+    if len(sources) != 1 or None in sources or not sources <= SOURCES:
+        raise ValueError(f"all flows must declare one supported feature_source; found {sources}")
+    return sources.pop()
 
 
 def read_jsonl(path):
@@ -27,6 +35,7 @@ def read_jsonl(path):
     ids = [r["flow_id"] for r in rows]
     if len(set(ids)) != len(ids):
         raise ValueError("flow_id must be unique")
+    feature_source(rows)
     return rows
 
 
@@ -91,6 +100,41 @@ def split_rows(rows, known, aux, heldout, seed=42):
             test.extend(rest[i] for i in t_idx)
     test.extend(r for r in selected if r["label"] in heldout)
     return train, valid, test, categories
+
+
+def split_assigned(rows, known, aux, heldout, assignments):
+    """Use independent capture/session assignments even when each capture has mixed labels."""
+    known, aux, heldout = set(known), set(aux), set(heldout)
+    if "benign" not in known or not aux or not heldout or known & aux or known & heldout or aux & heldout:
+        raise ValueError("known (including benign), auxiliary and held-out labels must be nonempty and disjoint")
+    if set(assignments) != {"train", "validation", "test"}:
+        raise ValueError("split file requires train, validation and test capture ID lists")
+    groups = [g for part in assignments.values() for g in part]
+    if len(groups) != len(set(groups)):
+        raise ValueError("a capture ID is assigned to multiple partitions")
+    selected = [r for r in rows if r["label"] in known | aux | heldout]
+    if {r["label"] for r in selected} != known | aux | heldout:
+        raise ValueError("one or more requested labels are missing")
+    observed = {r["capture_id"] for r in selected}
+    if observed != set(groups):
+        raise ValueError(f"split capture IDs differ from selected data: missing={sorted(observed-set(groups))}, extra={sorted(set(groups)-observed)}")
+    family_sets = defaultdict(set)
+    for r in selected:
+        family_sets[r["label"]].add(r["family"])
+    if any(len(v) != 1 for v in family_sets.values()):
+        raise ValueError("a fine label maps to multiple families")
+    known_families = {next(iter(family_sets[k])) for k in known}
+    categories = {k: ("type_b" if next(iter(family_sets[k])) in known_families else "type_a") for k in heldout}
+    parts = []
+    for part in ("train", "validation", "test"):
+        labels = known | (heldout if part == "test" else aux)
+        captures = set(assignments[part])
+        subset = [r for r in selected if r["capture_id"] in captures and r["label"] in labels]
+        required = known | (heldout if part == "test" else aux)
+        if not required <= {r["label"] for r in subset}:
+            raise ValueError(f"{part} is missing required labels {sorted(required-{r['label'] for r in subset})}")
+        parts.append(subset)
+    return *parts, categories
 
 
 def knn_edges(stats, k=4):

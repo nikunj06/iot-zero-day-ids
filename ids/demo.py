@@ -31,7 +31,8 @@ def generate(seed=7, groups=8, flows_per_group=20):
                                  packets=p, bytes=b, mean_size=b / p,
                                  iat_mean=duration / max(p - 1, 1),
                                  tcp_syn=1 if "SYN" in label or label == "Recon-Scan" else 0,
-                                 payload_hex=payload.hex(), label=label, family=family))
+                                 payload_hex=payload.hex(), label=label, family=family,
+                                 feature_source="synthetic_flow_v1"))
     rng.shuffle(rows)
     return rows
 

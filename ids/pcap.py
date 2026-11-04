@@ -73,7 +73,7 @@ def extract_capture(path, label, family, timeout=30):
                            bytes=flow["bytes"], mean_size=flow["bytes"] / flow["packets"],
                            iat_mean=sum(flow["gaps"]) / len(flow["gaps"]) if flow["gaps"] else 0,
                            tcp_syn=flow["tcp_syn"], payload_hex=flow["payload"].hex(),
-                           label=label, family=family))
+                           label=label, family=family, feature_source="pcap_packet_v1"))
     return output
 
 
@@ -88,11 +88,15 @@ def main():
     rows = []
     seen = set()
     for entry in manifest:
+        if not all(entry.get(k) for k in ("path", "label", "family")):
+            parser.error("each manifest item needs path, label, and family")
         path = Path(entry["path"])
         if path.stem in seen:
             parser.error("capture basenames must be unique")
         seen.add(path.stem)
         rows.extend(extract_capture(path, entry["label"], entry["family"]))
+    if not rows:
+        parser.error("no supported Ethernet/IP or ARP frames were found")
     save_jsonl(args.output, rows)
     print(f"Wrote {len(rows)} flows from {len(manifest)} labeled captures")
 
