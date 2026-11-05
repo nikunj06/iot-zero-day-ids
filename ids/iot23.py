@@ -24,12 +24,18 @@ def zeek_rows(path):
             if not fields:
                 raise ValueError(f"{path}:{line_no}: missing Zeek #fields header")
             values = line.split("\t")
-            # IoT-23 appends the last two label fields with spaces to some Zeek TSV logs.
+            # Some IoT-23 Zeek logs append the label columns using spaces.
             if len(values) == len(fields) - 2:
                 values = values[:-1] + values[-1].rsplit(None, 2)
+            elif len(values) == len(fields) - 1:
+                values = values[:-1] + values[-1].rsplit(None, 1)
             if len(values) != len(fields):
                 raise ValueError(f"{path}:{line_no}: {len(values)} values, expected {len(fields)}")
-            yield dict(zip(fields, values))
+            item = dict(zip(fields, values))
+            # IoT-23 captures use both `detailed-label` and `det_label`.
+            if "detailed-label" not in item and "det_label" in item:
+                item["detailed-label"] = item["det_label"]
+            yield item
 
 
 def number(value):
@@ -68,7 +74,10 @@ def make_rows(log_path, capture_id, taxonomy=None, unlabeled=False):
             mean_size=ip_bytes / packets if packets else 0.0,
             iat_mean=duration / (packets - 1) if packets > 1 else 0.0,
             tcp_syn=item.get("history", "").count("S") + item.get("history", "").count("s") if proto == "TCP" else 0,
-            payload_hex="", feature_source=SOURCE,
+            payload_hex="",
+            payload_orig_hex="",
+            payload_resp_hex="",
+            feature_source=SOURCE,
         )
         if not unlabeled:
             row.update(label=fine, family=family)
@@ -98,21 +107,37 @@ def packet_fields(frame):
 
 
 def add_payload(rows, paths, tolerance=0.05, length=128):
-    """Match each packet to a unique Zeek 5-tuple and time interval, never by row order."""
+    """Match packets to Zeek flows and preserve payload direction."""
     import dpkt
+
     indexed = defaultdict(list)
     for row in rows:
-        key = (row["src"], row["src_port"], row["dst"], row["dst_port"], row["protocol"])
+        key = (row["src"], row["src_port"], row["dst"],
+               row["dst_port"], row["protocol"])
         indexed[key].append(row)
-        reverse = (row["dst"], row["dst_port"], row["src"], row["src_port"], row["protocol"])
+
+        reverse = (row["dst"], row["dst_port"], row["src"],
+                   row["src_port"], row["protocol"])
         if reverse != key:
             indexed[reverse].append(row)
+
     for key in indexed:
         indexed[key].sort(key=lambda r: r["timestamp"])
-    starts = {key: [r["timestamp"] for r in group] for key, group in indexed.items()}
-    longest = {key: max(r["duration"] for r in group) for key, group in indexed.items()}
+
+    starts = {
+        key: [r["timestamp"] for r in group]
+        for key, group in indexed.items()
+    }
+    longest = {
+        key: max(r["duration"] for r in group)
+        for key, group in indexed.items()
+    }
+
     payload = defaultdict(bytearray)
+    payload_orig = defaultdict(bytearray)
+    payload_resp = defaultdict(bytearray)
     audit = Counter()
+
     for path in paths:
         with open(path, "rb") as handle:
             try:
@@ -120,30 +145,82 @@ def add_payload(rows, paths, tolerance=0.05, length=128):
             except (ValueError, dpkt.dpkt.NeedData):
                 handle.seek(0)
                 reader = dpkt.pcapng.Reader(handle)
+
             for ts, frame in reader:
                 packet = packet_fields(frame)
                 if packet is None:
                     audit["unsupported_packets"] += 1
                     continue
+
                 key, content = packet[:5], packet[5]
                 group = indexed.get(key, [])
-                stop = bisect.bisect_right(starts.get(key, []), ts + tolerance)
-                first = bisect.bisect_left(starts.get(key, []), ts - longest.get(key, 0) - tolerance)
-                # Overlapping windows or repeated 5-tuples are refused rather than guessed.
-                candidates = [r for r in group[first:stop]
-                              if ts >= r["timestamp"] - tolerance
-                              and ts <= r["timestamp"] + r["duration"] + tolerance]
+                stop = bisect.bisect_right(
+                    starts.get(key, []), ts + tolerance
+                )
+                first = bisect.bisect_left(
+                    starts.get(key, []),
+                    ts - longest.get(key, 0) - tolerance
+                )
+
+                # Refuse overlapping windows rather than guessing.
+                candidates = [
+                    row for row in group[first:stop]
+                    if ts >= row["timestamp"] - tolerance
+                    and ts <= row["timestamp"] + row["duration"] + tolerance
+                ]
+
                 if len(candidates) != 1:
-                    audit["ambiguous_packets" if candidates else "unmatched_packets"] += 1
+                    audit[
+                        "ambiguous_packets" if candidates
+                        else "unmatched_packets"
+                    ] += 1
                     continue
+
                 audit["matched_packets"] += 1
-                if content:
-                    uid = candidates[0]["flow_id"]
-                    if len(payload[uid]) < length:
-                        payload[uid].extend(content[:length - len(payload[uid])])
+                if not content:
+                    continue
+
+                row = candidates[0]
+                uid = row["flow_id"]
+
+                # Preserve the original combined-payload behavior.
+                if len(payload[uid]) < length:
+                    payload[uid].extend(
+                        content[:length - len(payload[uid])]
+                    )
+
+                original_key = (
+                    row["src"], row["src_port"],
+                    row["dst"], row["dst_port"],
+                    row["protocol"]
+                )
+
+                if key == original_key:
+                    target = payload_orig[uid]
+                    audit["original_direction_packets"] += 1
+                else:
+                    target = payload_resp[uid]
+                    audit["response_direction_packets"] += 1
+
+                if len(target) < length:
+                    target.extend(content[:length - len(target)])
+
     for row in rows:
-        row["payload_hex"] = payload[row["flow_id"]].hex()
-    audit["flows_with_payload"] = sum(bool(r["payload_hex"]) for r in rows)
+        uid = row["flow_id"]
+        row["payload_hex"] = payload[uid].hex()
+        row["payload_orig_hex"] = payload_orig[uid].hex()
+        row["payload_resp_hex"] = payload_resp[uid].hex()
+
+    audit["flows_with_payload"] = sum(
+        bool(row["payload_hex"]) for row in rows
+    )
+    audit["flows_with_original_payload"] = sum(
+        bool(row["payload_orig_hex"]) for row in rows
+    )
+    audit["flows_with_response_payload"] = sum(
+        bool(row["payload_resp_hex"]) for row in rows
+    )
+
     return audit
 
 
@@ -175,7 +252,7 @@ def label_inventory(manifest):
     counts = Counter()
     for item in manifest:
         for row in zeek_rows(item["zeek_log"]):
-            counts[(row.get("label", ""), row.get("detailed-label", ""))] += 1
+            counts[(row.get("label", ""), row.get("detailed-label", row.get("det_label", "")))] += 1
     return [{"label": label, "detailed_label": detail, "flows": n}
             for (label, detail), n in sorted(counts.items())]
 

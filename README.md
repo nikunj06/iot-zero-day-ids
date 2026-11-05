@@ -1,48 +1,97 @@
-# Payload-aware IoT open-set IDS
+# Payload-Aware IoT Open-Set Intrusion Detection System
 
-Educational research prototype: 1D-CNN over payload bytes, optional GATv2 over minibatch flow similarities, one-vs-rest sigmoid heads, auxiliary-unknown training, prototype-distance rejection, DBSCAN review grouping. This is inspired by the literature review; it is **not** a reproduction of NERO or DOC++. A rejected flow is unknown to the model, **not proof of a zero-day exploit**.
+An educational research prototype for IoT intrusion detection using 1D-CNN payload analysis, optional GATv2 graph learning, one-vs-rest classification, auxiliary-unknown training, prototype-distance rejection, and DBSCAN review grouping.
 
-## Start in VS Code
+This project is inspired by the literature review; it is **not** a reproduction of NERO or DOC++. A flow rejected by the model is classified as unknown, **not proof of a zero-day exploit**.
 
-Open the **zero_day_iot** folder itself, then open a PowerShell terminal there. Use Python 3.10–3.12.
+## 1. Getting Started
+
+### Requirements
+
+- Python 3.10–3.12
+- VS Code
+- Windows, Linux, or macOS
+
+### Installation
+
+Open the project folder in VS Code and use a terminal inside that folder.
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m ids.demo --output data/demo.jsonl
-.\.venv\Scripts\python.exe -m ids.train --input data/demo.jsonl --out runs/demo --epochs 12 --cpu
-.\.venv\Scripts\python.exe -m streamlit run dashboard.py
 ```
 
-If the executable is not found, run `pwd` and `Test-Path .\.venv\Scripts\python.exe`: you must be inside the project and finish creating the venv first. On macOS/Linux, use `python3 -m venv .venv`, then `./.venv/bin/python` in subsequent commands. The updated archive includes a trained **synthetic** demo in `runs/demo`, so you can launch the dashboard immediately after installing dependencies. Select **Saved evaluation**.
-
-## Three distinct results
-
-| View | Input | Detector | What changes |
-| --- | --- | --- | --- |
-| Saved evaluation | Generated `data/demo.jsonl` | CNN/GATv2 plus prototype threshold | Only when you retrain; held-out metrics do not update with local traffic |
-| Local live lab | Loopback TCP messages in `data/live.jsonl` | Transparent application rules | New completed sessions and rule alerts when the lab runs |
-| Model comparison | Same generated train/test split | Four trained variants | Changes when `ids.compare` runs |
-
-The live collector's `packets` field means **application messages**, not captured IP packets. Its features are incompatible with the trained synthetic model. The watcher routes them to separate rules. It will not silently feed them to CNN/GATv2.
-
-To see local activity, use three PowerShell terminals in the project:
+Generate and train the synthetic demo:
 
 ```powershell
-# Terminal 1: collector and bounded loopback scenarios
-.\.venv\Scripts\python.exe -m ids.live_lab --output data/live.jsonl --duration 45 --scenario mixed
-# Terminal 2: watcher, keep running; start before or during Terminal 1
-.\.venv\Scripts\python.exe -m ids.watch --input data/live.jsonl --out runs/live
-# Terminal 3: dashboard; select Local live lab (refreshes every 3 seconds)
+.\.venv\Scripts\python.exe -m ids.demo --output data/demo.jsonl
+.\.venv\Scripts\python.exe -m ids.train --input data/demo.jsonl --out runs/demo --epochs 12 --cpu
+```
+
+Launch the dashboard:
+
+```powershell
 .\.venv\Scripts\python.exe -m streamlit run dashboard.py
 ```
 
-You may score a finished file once with `python -m ids.live_rules --input data/live.jsonl --out runs/live`. The lab only connects to 127.0.0.1 and runs at most 300 seconds. `normal`, `burst`, and `unusual_command` select bounded scenarios. `lab_pattern` is simulator context, never a model feature. Local alerts are based on 20+ messages per session or an unexpected CONFIG message; they are **not model predictions or real attack validation**.
+The repository includes a trained synthetic demo in `runs/demo`. After installing dependencies, you can launch the dashboard immediately and select **Saved evaluation**.
 
-## Real PCAP evaluation
+On macOS/Linux, create the environment with `python3 -m venv .venv` and use `./.venv/bin/python` for subsequent commands.
 
-Bring **your own labeled, homogeneous PCAP captures**. No real attack PCAP is bundled. A manifest is a JSON list:
+## 2. Project Workspaces
+
+| Workspace | Input | Function |
+|---|---|---|
+| Saved evaluation | Generated evaluation data | Displays saved model predictions and metrics |
+| Local live lab | Loopback TCP messages | Demonstrates application-level monitoring rules |
+| Model comparison | Synthetic train/test split | Compares four model configurations |
+| Custom run | Trained evaluation output | Loads a user-selected experiment |
+| Dataset Overview | Dataset quality report | Displays dataset composition and import statistics |
+
+### Local Live Lab
+
+The live lab uses loopback TCP application messages. Its `packets` field refers to application messages, not captured IP packets.
+
+The simulator's features are incompatible with the trained synthetic model. The watcher processes them separately using transparent application rules rather than silently feeding them into CNN/GATv2.
+
+Run the following commands in three separate PowerShell terminals.
+
+**Terminal 1 – Generate local traffic**
+
+```powershell
+.\.venv\Scripts\python.exe -m ids.live_lab --output data/live.jsonl --duration 45 --scenario mixed
+```
+
+**Terminal 2 – Start the watcher**
+
+```powershell
+.\.venv\Scripts\python.exe -m ids.watch --input data/live.jsonl --out runs/live
+```
+
+**Terminal 3 – Launch the dashboard**
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run dashboard.py
+```
+
+Select **Local live lab** in the dashboard. It refreshes every three seconds.
+
+You can also score a completed file once:
+
+```powershell
+python -m ids.live_rules --input data/live.jsonl --out runs/live
+```
+
+The lab only connects to `127.0.0.1` and runs for at most 300 seconds. The `normal`, `burst`, and `unusual_command` options select bounded scenarios. `lab_pattern` is simulator context and is never used as a model feature.
+
+Local alerts are based on 20 or more messages per session or an unexpected CONFIG message. They are **not model predictions or real attack validation**.
+
+## 3. Real PCAP Evaluation
+
+The PCAP importer supports labeled, homogeneous TCP/UDP captures. No real attack PCAP files are bundled with the repository.
+
+A manifest is a JSON list:
 
 ```json
 [
@@ -51,56 +100,226 @@ Bring **your own labeled, homogeneous PCAP captures**. No real attack PCAP is bu
 ]
 ```
 
-Provide several independent captures per label and enough known/auxiliary/held-out labels. Each manifest entry is assigned a capture-level label; mixed-label captures or unverified capture labels **must not** be used. Do not join labels to packets by CSV row order.
+Use independent captures for each label. Each manifest entry is assigned a capture-level label, so mixed-label captures and unverified capture labels must not be used. Labels must not be associated with packets by CSV row order.
+
+Generate flow records:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ids.pcap --manifest data/captures.json --output data/flows.jsonl
 .\.venv\Scripts\python.exe -m ids.inspect_data --input data/flows.jsonl
+```
+
+Train a model using your dataset's taxonomy:
+
+```powershell
 .\.venv\Scripts\python.exe -m ids.train --input data/flows.jsonl --out runs/pcap --known "benign,DoS-SYN,Recon-Scan" --aux "Spoof-ARP" --heldout "DoS-HTTP,Mirai-Bot" --cpu
 ```
 
-Replace those example labels with your actual dataset taxonomy. Each known label needs at least three independent capture IDs; each auxiliary unknown needs at least two. Training prevents a capture from crossing its train/validation/test partitions. Type B is a held-out subtype in a known broad family; Type A holds out a whole broad family. The held-out samples are never used to fit model weights or thresholds. After training, select **Custom run** and enter `runs/pcap`.
+Replace the example labels with labels from your actual dataset. Each known label needs at least three independent capture IDs; each auxiliary unknown needs at least two.
 
-The importer produces `feature_source=pcap_packet_v1`; the synthetic generator uses `synthetic_flow_v1`; the local simulator uses `app_message_v1`. Mixing sources in training or inference is rejected. To score **unlabeled PCAP-extracted flows**, use a model trained on compatible PCAP-extracted features:
+The training pipeline supports capture-level partitioning to prevent a capture from appearing in multiple partitions.
+
+Type B represents a held-out subtype in a known broad family. Type A represents a held-out broad family. Held-out samples are not used to fit model weights or thresholds.
+
+After training, select **Custom run** in the dashboard and enter the corresponding output directory, such as `runs/pcap`.
+
+The importer produces `feature_source=pcap_packet_v1`. The synthetic generator uses `synthetic_flow_v1`, while the local simulator uses `app_message_v1`. Incompatible sources are rejected during training or inference.
+
+### Inference on Unlabeled Flows
+
+To score unlabeled PCAP-extracted flows, use a model trained on compatible PCAP features:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ids.infer --input data/unlabeled_pcap_flows.jsonl --run runs/pcap --out runs/fresh
 ```
 
-Remove label/family from fresh input if appropriate. Keep `flow_id`, `capture_id`, `feature_source`, numeric features, and `payload_hex`. The PCAP importer is a limited TCP/UDP flow aggregator, not Wi-Fi rogue AP detection. Encrypted payload bytes cannot reveal cleartext application exploits. Neither capture-level labels nor network data provenance can be verified automatically.
+The input should contain `flow_id`, `capture_id`, `feature_source`, numeric features, and `payload_hex`. Remove label and family fields when scoring genuinely unlabeled data.
 
-## Comparison and interpretation
+The PCAP importer is a limited TCP/UDP flow aggregator, not a Wi-Fi rogue access point detector. Encrypted payload bytes do not reveal cleartext application exploits. Capture-level labels and network-data provenance cannot be verified automatically.
+
+## 4. IoT-23 Dataset Evaluation
+
+The project supports flow-level evaluation using the IoT-23 dataset.
+
+The importer processes labeled Zeek connection logs and can optionally associate PCAP packets with flows using connection tuples and timestamps. This enables extraction of original-direction and response-direction payload features.
+
+### Selected Scenarios
+
+| Capture ID | Scenario | Role |
+|---|---|---|
+| `mirai_34_1` | Mirai malware | Training |
+| `hakai_8_1` | Hakai malware | Training |
+| `philips_hue` | Philips Hue benign traffic | Validation |
+| `torii_20_1` | Torii malware | Testing |
+
+The detailed IoT-23 labels are mapped into the project's classes:
+
+- `benign`
+- `C&C`
+- `DDoS`
+- `PortScan`
+
+### Dataset Preparation
+
+Download the required scenarios from the official [Stratosphere Laboratory IoT-23 dataset](https://www.stratosphereips.org/datasets-iot23).
+
+Place the extracted Zeek logs and optional PCAP files under `datasets/iot23/`.
+
+The dataset configuration includes:
+
+- `manifest.json` – capture locations and identifiers.
+- `taxonomy.json` – detailed-label mapping.
+- `splits_capture.json` – capture-level training, validation, and test assignments.
+
+Raw PCAP files, Zeek logs, and generated flow records are not included in the repository. They must be obtained and prepared locally.
+
+Generate the flow-level dataset:
+
+```powershell
+python -m ids.iot23 --manifest datasets/iot23/manifest.json --taxonomy datasets/iot23/taxonomy.json --output datasets/iot23/flows.jsonl
+```
+
+### Dataset Quality Report
+
+Generate a dataset quality and coverage report:
+
+```powershell
+python -m ids.dataset_report --input datasets/iot23/flows.jsonl --audit datasets/iot23/flows.jsonl.audit.json --out runs/iot23_dataset_quality
+```
+
+This produces JSON and Markdown reports covering:
+
+- Flow and capture counts.
+- Label and family distributions.
+- Payload availability and payload bytes.
+- Missing and invalid values.
+- Duplicate flow identifiers.
+- PCAP importer audit statistics.
+
+The dashboard's **Dataset Overview** workspace can display the generated report.
+
+### Capture-Independent Evaluation
+
+The supplied capture split is:
+
+- **Training:** Mirai and Hakai.
+- **Validation:** Philips Hue.
+- **Testing:** Torii.
+
+Run the stats-only experiment:
+
+```powershell
+python -m ids.train `
+  --input datasets/iot23/flows.jsonl `
+  --out runs/iot23_multi_capture `
+  --known benign,DDoS `
+  --aux PortScan `
+  --heldout "C&C" `
+  --splits datasets/iot23/splits_capture.json `
+  --branch stats `
+  --no-graph `
+  --epochs 12 `
+  --batch-size 64 `
+  --decision hybrid
+```
+
+### Evaluation Results
+
+The capture-independent test on the held-out Torii capture produced the following results:
+
+| Metric | Result |
+|---|---:|
+| Held-out C&C recall | **87.50% (14/16)** |
+| Unknown precision | **93.33% (14/15)** |
+| Benign false-alert rate | **0.031% (1/3,193)** |
+| Test flows | **3,209** |
+
+The model identified 14 of the 16 held-out C&C flows as unknown. One benign flow was incorrectly flagged.
+
+**Evaluation limitations:**
+
+- The held-out test contains only 16 C&C flows, so recall is based on a small attack sample.
+- DDoS traffic is not represented in the test partition.
+- The validation capture contains benign traffic only. Therefore, thresholds were not calibrated against known attack-family or auxiliary unknown examples in validation.
+- Results demonstrate performance on this particular held-out capture, not general zero-day detection across IoT networks.
+
+Capture-independent results should be reported separately from random flow-level evaluation.
+
+### Directional Payload Features
+
+When matching PCAP files are available, the IoT-23 importer can extract original-direction and response-direction payloads.
+
+Payload availability varies significantly across captures. Stats-only and payload-based experiments should therefore be compared rather than assuming payload features always improve detection.
+
+## 5. Model Comparison and Interpretation
+
+Run the model comparison experiment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m ids.compare --input data/demo.jsonl --out runs/comparison --epochs 12
 ```
 
-This trains stats-only, payload-only, combined without graph, and full GATv2 on the **same seed and split**. Select **Model comparison**. On the bundled synthetic data the simpler stats-only model can outperform the full graph. Report that finding honestly: synthetic structure and minibatch graph edges do not establish a graph benefit. For real data, pass explicit `--known`, `--aux`, and `--heldout` labels to `ids.compare` too.
+This compares:
 
-The hybrid decision accepts a flow only if its highest class score meets a validation threshold **and** its embedding is close enough to that class prototype. This improves overall synthetic unknown recall in the bundled run, while Type B recall remains low and benign false alerts increase. `metrics.json` gives the actual numbers; `predictions.csv` shows `rejection_reason` and distance. Type A/B classification is reported only among successfully rejected held-out flows, with its count. `novelty_score=1-confidence` is a display aid, not a complete hybrid decision score.
+1. Stats-only model.
+2. Payload-only model.
+3. Combined model without graph.
+4. Full GATv2 model.
 
-## Review and adaptation
+The variants use the same seed and data split. Select **Model comparison** in the dashboard to inspect the results.
 
-`review_queue.csv` holds rejected flows; `clusters.csv` groups some for human triage. For new, independently sourced, compatible records, export reviews in the **Custom run** view and adapt:
+On the bundled synthetic data, the simpler stats-only model can outperform the full graph model. Synthetic structure and minibatch graph edges do not establish a graph benefit. Results should be interpreted according to the dataset and evaluation setup.
+
+For real datasets, specify appropriate `--known`, `--aux`, and `--heldout` labels and use capture-independent partitions.
+
+## 6. Important Limitations
+
+- This is an educational prototype, not a production intrusion detection system.
+- Unknown predictions indicate model rejection, not confirmed zero-day attacks.
+- Dataset imbalance and limited payload availability can affect detection performance.
+- Results from synthetic traffic are not evidence of real-world attack detection.
+- The current PCAP pipeline focuses on TCP/UDP flows and does not implement Wi-Fi rogue access point discovery.
+- Device risk scores are heuristic indicators based on observed flow alerts and source IP addresses, not verified physical-device identities.
+- Model performance should be evaluated on independent captures and interpreted with the size and composition of the test set in mind.
+
+## 7. Testing
+
+Run the test suite from the project root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m ids.adapt --base data/demo.jsonl --new data/fresh_demo.jsonl --reviews data/review_demo.csv --output data/version2.jsonl
+python -m pytest -v
 ```
 
-The included fresh/review examples are synthetic. After adaptation, retrain to a **new output directory**, update `--known` and use a different untouched held-out set. Never tune on the original held-out evaluation then claim independent test performance. There is no automated production hot swap.
+The tests cover dataset handling, IoT-23 parsing, payload extraction, model inference, and source compatibility.
 
-## Project map
+## 8. Project Structure
 
-- `ids/demo.py`, `ids/pcap.py`, `ids/live_lab.py`: synthetic, PCAP, and local telemetry inputs.
-- `ids/inspect_data.py`, `ids/data.py`: source checks, feature matrices, grouped splits.
-- `ids/model.py`, `ids/train.py`, `ids/infer.py`: CNN/GATv2, hybrid calibration, compatible scoring.
-- `ids/live_rules.py`, `ids/watch.py`: local rules and live file watcher.
-- `ids/compare.py`: reproducible ablations.
-- `ids/adapt.py`, `dashboard.py`: reviewed retraining input and results.
+```text
+iot-zero-day-ids/
+│
+├── dashboard.py
+├── requirements.txt
+├── README.md
+│
+├── ids/
+│   ├── data.py
+│   ├── model.py
+│   ├── train.py
+│   ├── infer.py
+│   ├── iot23.py
+│   ├── pcap.py
+│   ├── dataset_report.py
+│   └── device_profile.py
+│
+├── data/
+│   └── demo.jsonl
+│
+├── tests/
+│
+├── datasets/
+│   └── iot23/
+│
+└── runs/
+```
 
-The graph uses nearest flows **within each minibatch**, so outputs may change with batch composition. Stronger experiments require independent sessions/devices, provenance checks, multiple seeds, meaningful baselines, and clear false-alarm tradeoffs. This prototype should not be deployed as a production IDS.
-
-## References
-
-- Cevallos Moreno et al., [NERO: NEural algorithmic reasoning for zeRO-day attack detection in the IoT](https://doi.org/10.1016/j.cose.2024.103898), *Computers & Security* 142 (2024).
-- Soltani et al., [An adaptable deep learning-based intrusion detection system to zero-day attacks](https://doi.org/10.1016/j.jisa.2023.103516), *Journal of Information Security and Applications* 76 (2023).
+The `datasets/` and `runs/` directories may contain locally generated data and experiment outputs that are not distributed with the source repository.

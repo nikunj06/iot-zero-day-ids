@@ -6,7 +6,7 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import streamlit as st
-
+from ids.device_profile import build_device_profiles
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -14,6 +14,7 @@ VIEWS = {
     "Evaluation": RUNS / "demo",
     "Local lab": RUNS / "live",
     "Comparisons": RUNS / "comparison",
+    "Dataset Overview": RUNS / "iot23_dataset_quality",
 }
 COLORS = {
     "unknown": "#ffbb72",
@@ -322,6 +323,268 @@ def review(data, queue, is_lab, prefix):
                        "review_decisions.csv", "text/csv", key=f"{prefix}_reviews")
 
 
+def device_intelligence(data):
+    section(
+        "Device inventory",
+        "Observed source IPs and their activity-based risk indicators."
+    )
+
+    try:
+        profiles = build_device_profiles(data)
+    except (ValueError, KeyError) as error:
+        st.warning(f"Device profiling unavailable: {error}")
+        return
+
+    total_devices = len(profiles)
+
+    flagged = profiles["risk_level"].isin(
+        ["Medium", "High"]
+    ).sum()
+
+    insufficient = (
+        profiles["risk_level"] == "Insufficient data"
+    ).sum()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        metric("Observed endpoints", total_devices,
+               "Unique source IP addresses")
+
+    with col2:
+        metric("Flagged endpoints", int(flagged),
+               "Medium or high heuristic risk", "amber")
+
+    with col3:
+        metric("Insufficient observations", int(insufficient),
+               "Fewer than 10 observed flows")
+
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+
+    section("Risk overview")
+
+    st.dataframe(
+        profiles,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "risk_score": st.column_config.ProgressColumn(
+                "Risk score",
+                min_value=0,
+                max_value=100,
+                format="%.1f"
+            ),
+            "alert_rate": st.column_config.NumberColumn(
+                "Alert rate",
+                format="%.2%%"
+            )
+        }
+    )
+
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+
+    section("Investigate an endpoint")
+
+    selected_ip = st.selectbox(
+        "Select source IP",
+        profiles["src"].tolist(),
+        key="device_selected_ip"
+    )
+
+    device = data[data["src"].astype(str) == selected_ip].copy()
+
+    st.caption(f"Showing {len(device):,} flows associated with {selected_ip}")
+
+    left, right = st.columns(2)
+
+    with left:
+        section("Destination activity")
+        destinations = (
+            device.groupby("dst")
+            .agg(
+                flows=("flow_id", "count"),
+                alerts=("predicted", lambda x: x.isin(
+                    ["unknown", "lab_alert"]
+                ).sum())
+            )
+            .reset_index()
+            .sort_values("alerts", ascending=False)
+        )
+
+        st.dataframe(
+            destinations,
+            hide_index=True,
+            width="stretch"
+        )
+
+    with right:
+        section("Suspicious flows")
+        suspicious = device[
+            device["predicted"].isin(["unknown", "lab_alert"])
+        ]
+
+        if suspicious.empty:
+            st.success("No suspicious flows recorded for this endpoint.")
+        else:
+            columns = [
+                col for col in [
+                    "flow_id", "dst", "predicted",
+                    "confidence", "rejection_reason"
+                ]
+                if col in suspicious.columns
+            ]
+
+            st.dataframe(
+                suspicious[columns],
+                hide_index=True,
+                width="stretch"
+            )
+
+    st.caption(
+        "Risk scores are heuristic indicators based on observed flow "
+        "predictions, not probabilities of device compromise. "
+        "Source IPs represent observed endpoints, not verified physical devices."
+    )
+
+
+def dataset_overview(directory):
+    report_path = directory / "dataset_quality_report.json"
+    if not report_path.exists():
+        st.info(
+            "Dataset quality report not found. Generate it with "
+            "`python -m ids.dataset_report --input datasets/iot23/flows.jsonl "
+            "--audit datasets/iot23/flows.jsonl.audit.json "
+            "--out runs/iot23_dataset_quality`."
+        )
+        return
+
+    report = read_json(report_path)
+    if not report or "dataset" not in report:
+        st.error("The dataset quality report is empty or has an unsupported format.")
+        return
+
+    dataset = report["dataset"]
+    payload = report.get("payload_coverage", {})
+    quality = report.get("data_quality", {})
+    audit = report.get("pcap_import_audit", {})
+
+    banner(
+        "IOT-23 DATASET",
+        f"Source: {dataset.get('feature_source', 'unknown')} · "
+        "Imported flow-level records and PCAP extraction audit."
+    )
+    st.write("")
+
+    cards = [
+        ("Imported flows", f"{dataset.get('total_flows', 0):,}", "Flow-level records", ""),
+        ("Captures", f"{dataset.get('capture_count', 0):,}", "Distinct capture IDs", ""),
+        ("Payload coverage", f"{payload.get('payload_hex', {}).get('coverage_percent', 0):.2f}%",
+         "Flows with combined payload", "teal"),
+        ("Duplicate flow IDs", f"{quality.get('duplicate_flow_ids', 0):,}",
+         "Expected: zero", "amber" if quality.get("duplicate_flow_ids", 0) else "teal"),
+    ]
+    columns = st.columns(4)
+    for col, (label, value, hint, tone) in zip(columns, cards):
+        with col:
+            metric(label, value, hint, tone)
+
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+    left, right = st.columns([1.1, 1])
+    with left:
+        section("Label distribution", "Number of imported flows for each ground-truth label.")
+        labels = dataset.get("label_distribution", {})
+        if labels:
+            label_data = pd.DataFrame(
+                [{"label": label, "flows": count} for label, count in labels.items()]
+            ).sort_values("flows", ascending=False)
+            chart = alt.Chart(label_data).mark_bar(
+                cornerRadiusEnd=5, size=26
+            ).encode(
+                y=alt.Y("label:N", sort="-x", title=None),
+                x=alt.X("flows:Q", title="Flows"),
+                color=alt.Color("label:N", legend=None),
+                tooltip=["label:N", "flows:Q"],
+            ).properties(height=max(170, 42 * len(label_data)))
+            st.altair_chart(
+                chart.configure_view(stroke=None).configure_axis(
+                    labelColor="#b8c8d4", titleColor="#b8c8d4",
+                    gridColor="#28394b", domainColor="#405365"
+                ),
+                width="stretch",
+            )
+        else:
+            st.info("No label distribution is recorded.")
+    with right:
+        section("Dataset composition")
+        metric("Benign flows", f"{dataset.get('benign_flows', 0):,}",
+               f"{dataset.get('benign_percent', 0):.2f}% of dataset", "teal")
+        st.write("")
+        metric("Attack flows", f"{dataset.get('attack_flows', 0):,}",
+               f"{dataset.get('attack_percent', 0):.2f}% of dataset", "amber")
+        st.write("")
+        section("Capture breakdown")
+        capture_rows = [
+            {"Capture": capture, "Flows": count}
+            for capture, count in dataset.get("captures", {}).items()
+        ]
+        if capture_rows:
+            st.dataframe(
+                pd.DataFrame(capture_rows).sort_values("Flows", ascending=False),
+                hide_index=True, width="stretch"
+            )
+
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+    section("Payload availability", "Payload coverage is measured per flow, not per packet.")
+    payload_rows = [
+        {
+            "Payload field": field,
+            "Flows with payload": values.get("flows_with_payload", 0),
+            "Coverage": f"{values.get('coverage_percent', 0):.2f}%",
+            "Payload bytes": f"{values.get('total_payload_bytes', 0):,}",
+        }
+        for field, values in payload.items()
+    ]
+    if payload_rows:
+        st.dataframe(pd.DataFrame(payload_rows), hide_index=True, width="stretch")
+
+    st.markdown('<div class="rule"></div>', unsafe_allow_html=True)
+    left, right = st.columns(2)
+    with left:
+        section("Data quality checks")
+        missing = quality.get("missing_field_counts", {})
+        invalid = quality.get("invalid_value_counts", {})
+        metric("Duplicate flow IDs", f"{quality.get('duplicate_flow_ids', 0):,}",
+               "Unique flow identifier check",
+               "teal" if quality.get("duplicate_flow_ids", 0) == 0 else "amber")
+        st.write("")
+        st.markdown("**Missing values**")
+        st.json(missing if missing else {"status": "None detected"})
+        st.markdown("**Invalid values**")
+        st.json(invalid if invalid else {"status": "None detected"})
+    with right:
+        section("PCAP importer audit", "Packet-level extraction counters; distinct from flow coverage.")
+        if audit:
+            audit_rows = [
+                {"Audit metric": key.replace("_", " ").title(), "Value": value}
+                for key, value in audit.items()
+            ]
+            st.dataframe(pd.DataFrame(audit_rows), hide_index=True, width="stretch")
+        else:
+            st.info("No importer audit data was included in this report.")
+
+    st.caption(
+        "Unsupported packets are not necessarily malformed. They may use packet "
+        "formats or protocols that the current extractor does not process. "
+        "Missing payload does not invalidate a flow's statistical features."
+    )
+    st.download_button(
+        "Download dataset quality report (JSON)",
+        json.dumps(report, indent=2).encode("utf-8"),
+        file_name="dataset_quality_report.json",
+        mime="application/json",
+    )
+
+
 def comparison(directory):
     path = directory / "summary.csv"
     if not path.exists():
@@ -362,7 +625,7 @@ def comparison(directory):
 st.sidebar.markdown('<div class="brand"><span class="brand-mark">◈</span>SIGNAL</div>'
                     '<div class="brand-sub">IoT SECURITY WORKBENCH</div>', unsafe_allow_html=True)
 st.sidebar.markdown("### Workspace")
-view = st.sidebar.radio("Choose a workspace", ["Evaluation", "Local lab", "Comparisons", "Custom run"],
+view = st.sidebar.radio("Choose a workspace", ["Evaluation", "Local lab", "Comparisons", "Dataset Overview", "Custom run"],
                         label_visibility="collapsed")
 directory = VIEWS.get(view)
 if view == "Comparisons":
@@ -383,12 +646,15 @@ titles = {
     "Local lab": ("Live lab", "Watch bounded loopback sessions and inspect the exact rules behind alerts."),
     "Comparisons": ("Model comparisons", "Test whether each architectural component adds value on the same split."),
     "Custom run": ("Run investigation", "Examine scored flows from a compatible model run."),
+    "Dataset Overview": ("Dataset overview", "Inspect IoT-23 coverage, labels, payload availability, and import quality."),
 }
 title, subtitle = titles[view]
 st.title(title)
 st.markdown(f'<p class="lede">{esc(subtitle)}</p>', unsafe_allow_html=True)
 
-if view == "Comparisons":
+if view == "Dataset Overview":
+    dataset_overview(directory)
+elif view == "Comparisons":
     comparison(directory)
 else:
     is_lab = view == "Local lab"
@@ -434,12 +700,34 @@ else:
                 ("Alert share", f"{alerts / len(data):.1%}", "Of completed sessions", ""),
             ]
         elif model_run:
-            cards = [
-                ("Known macro F1", f"{metrics['known_macro_f1']:.3f}", "Known classes only", ""),
-                ("Unknown recall", f"{metrics['unknown_recall']:.3f}", "Held-out attack labels", "teal"),
-                ("Type B recall", f"{metrics.get('type_b_unknown_recall', 0):.3f}", "Novel subtype of known family", "amber"),
-                ("Benign false alerts", f"{metrics['benign_false_alarm_rate']:.1%}", "Benign test flows", ""),
-            ]
+            if source == "iot23_zeek_v1" and "C&C" in metrics.get("heldout_recall_by_label", {}):
+                benign_rows = data[data["true_label"] == "benign"]
+                benign_alerts = int((benign_rows["predicted"] != "benign").sum())
+                heldout_rows = data[data["true_label"] == "C&C"]
+                detected_heldout = int((heldout_rows["predicted"] == "unknown").sum())
+                unknown_precision = metrics.get("unknown_precision")
+
+                cards = [
+                    ("Held-out C&C recall",
+                     f"{detected_heldout / max(len(heldout_rows), 1):.1%}",
+                     f"{detected_heldout}/{len(heldout_rows)} C&C flows detected", "teal"),
+                    ("Unknown precision",
+                     "—" if unknown_precision is None else f"{unknown_precision:.1%}",
+                     "Among flows rejected as unknown", ""),
+                    ("Benign false-alert rate",
+                     f"{benign_alerts / max(len(benign_rows), 1):.3%}",
+                     f"{benign_alerts}/{len(benign_rows)} benign flows", ""),
+                    ("Test flows",
+                     f"{len(data):,}",
+                     "Held-out Torii capture", ""),
+                ]
+            else:
+                cards = [
+                    ("Known macro F1", f"{metrics['known_macro_f1']:.3f}", "Known classes only", ""),
+                    ("Unknown recall", f"{metrics['unknown_recall']:.3f}", "Held-out attack labels", "teal"),
+                    ("Type B recall", "—" if metrics.get("type_b_unknown_recall") is None else f"{metrics['type_b_unknown_recall']:.3f}", "Not measured for this run" if metrics.get("type_b_unknown_recall") is None else "Novel subtype of known family", "amber"),
+                    ("Benign false alerts", f"{metrics['benign_false_alarm_rate']:.3%}", "Benign test flows", ""),
+                ]
         elif pilot:
             cards = [
                 ("Scored flows", f"{len(data):,}", "Observation window", ""),
@@ -461,8 +749,8 @@ else:
             with col:
                 metric(label, value, hint, tone)
         st.write("")
-        tab_overview, tab_explorer, tab_review, tab_method = st.tabs(
-            ["Overview", "Flow explorer", "Review queue", "How to read this"]
+        tab_overview, tab_explorer, tab_review, tab_devices, tab_method = st.tabs(
+            ["Overview", "Flow explorer", "Review queue", "Device Intelligence", "How to read this"]
         )
         with tab_overview:
             if is_lab:
@@ -516,6 +804,8 @@ else:
             explorer(data, metrics, is_lab, view.lower().replace(" ", "_"))
         with tab_review:
             review(data, queue, is_lab, view.lower().replace(" ", "_"))
+        with tab_devices:
+            device_intelligence(data)
         with tab_method:
             section("What these numbers mean")
             if is_lab:

@@ -1,0 +1,20 @@
+[
+    {
+        "capture_id": "philips_hue",
+        "zeek_log": "datasets/iot23/conn.log.labeled",
+        "pcap": "datasets/iot23/2018-10-25-14-06-32-192.168.1.132.pcap"
+    },
+    {
+        "capture_id": "mirai_34_1",
+        "zeek_log": "datasets/iot23/mirai_34_1.labeled.txt"
+    },
+    {
+        "capture_id": "torii_20_1",
+        "zeek_log": "datasets/iot23/zeek.labeled.txt",
+        "pcap": "datasets/iot23/2018-10-02-13-12-30-192.168.100.103.pcap"
+    },
+    {
+        "capture_id": "hakai_8_1",
+        "zeek_log": "datasets/iot23/hakai_8_1.labeled.txt"
+    }
+]

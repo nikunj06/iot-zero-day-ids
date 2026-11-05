@@ -12,8 +12,11 @@ from sklearn.metrics import f1_score, homogeneity_score
 from sklearn.preprocessing import StandardScaler
 from torch import nn
 
-from .data import FEATURES, feature_source, matrices, read_jsonl, split_assigned, split_rows
-from .model import PayloadGraphIDS
+from .data import (
+    FEATURES, feature_source, matrices, directional_matrices,
+    read_jsonl, split_assigned, split_rows, split_flows
+)
+from .model import PayloadGraphIDS, DirectionalPayloadGraphIDS
 
 
 DEFAULT_KNOWN = ["benign", "DoS-SYN", "Recon-Scan"]
@@ -25,28 +28,98 @@ def parse_labels(value):
     return [x.strip() for x in value.split(",") if x.strip()]
 
 
-def predict_batches(model, rows, scaler, payload_len, batch_size, device):
+def model_inputs(rows, payload_len, scaler, model_type):
+    if model_type == "directional":
+        s, po, pr, mo, mr, _ = directional_matrices(
+            rows, payload_len, scaler
+        )
+        return (
+            torch.from_numpy(s),
+            torch.from_numpy(po),
+            torch.from_numpy(pr),
+            torch.from_numpy(mo),
+            torch.from_numpy(mr)
+        )
+
+    s, p, m, _ = matrices(rows, payload_len, scaler)
+    return (
+        torch.from_numpy(s),
+        torch.from_numpy(p),
+        torch.from_numpy(m)
+    )
+
+
+def forward_model(model, inputs, device):
+    tensors = [value.to(device) for value in inputs]
+    return model(*tensors)
+
+
+def predict_batches(
+    model, rows, scaler, payload_len, batch_size, device,
+    model_type="baseline"
+):
     model.eval()
     all_prob, all_family, all_embeddings = [], [], []
+
     with torch.no_grad():
         for start in range(0, len(rows), batch_size):
             batch = rows[start : start + batch_size]
-            s, p, m, _ = matrices(batch, payload_len, scaler)
-            logits, family_logits, emb = model(torch.from_numpy(s).to(device), torch.from_numpy(p).to(device), torch.from_numpy(m).to(device))
+            inputs = model_inputs(
+                batch, payload_len, scaler, model_type
+            )
+            logits, family_logits, emb = forward_model(
+                model, inputs, device
+            )
+
             all_prob.append(torch.sigmoid(logits).cpu().numpy())
             all_family.append(torch.sigmoid(family_logits).cpu().numpy())
             all_embeddings.append(emb.cpu().numpy())
-    return np.concatenate(all_prob), np.concatenate(all_family), np.concatenate(all_embeddings)
+
+    return (
+        np.concatenate(all_prob),
+        np.concatenate(all_family),
+        np.concatenate(all_embeddings)
+    )
 
 
 def select_threshold(prob, rows, known, aux):
     confidence = prob.max(axis=1)
-    target = np.array([r["label"] in known for r in rows])
-    # Balanced acceptance/rejection on validation known and auxiliary unknown.
-    # A sigmoid value below 0.5 is not affirmative evidence for a known class.
-    options = np.unique(np.r_[0.5, np.linspace(0.5, 0.99, 50), confidence[confidence >= 0.5]])
-    scores = [(0.5 * ((confidence[target] >= t).mean() + (confidence[~target] < t).mean()), t) for t in options]
-    return float(max(scores, key=lambda x: (x[0], -abs(x[1] - .5)))[1])
+    target = np.array([
+        row["label"] in known for row in rows
+    ])
+
+    if not target.any():
+        raise ValueError("validation requires known samples")
+
+    # Known-only validation cannot optimize unknown rejection.
+    if target.all():
+        return 0.5
+
+    options = np.unique(
+        np.r_[
+            0.5,
+            np.linspace(0.5, 0.99, 50),
+            confidence[confidence >= 0.5]
+        ]
+    )
+
+    scores = [
+        (
+            0.5 * (
+                (confidence[target] >= threshold).mean()
+                + (confidence[~target] < threshold).mean()
+            ),
+            threshold
+        )
+        for threshold in options
+    ]
+
+    return float(
+        max(
+            scores,
+            key=lambda item: (item[0], -abs(item[1] - 0.5))
+        )[1]
+    )
 
 
 def prototype_distance(embeddings, predicted_indices, center, scale, prototypes):
@@ -54,16 +127,46 @@ def prototype_distance(embeddings, predicted_indices, center, scale, prototypes)
     return np.linalg.norm(normalized - prototypes[predicted_indices], axis=1)
 
 
-def select_distance_threshold(distances, confidence, rows, known, confidence_threshold):
-    positive = np.asarray([r["label"] in known for r in rows])
-    if not positive.any() or positive.all():
-        raise ValueError("validation requires known and auxiliary unknown samples")
-    candidates = np.unique(np.r_[np.quantile(distances, np.linspace(0, 1, 101)), distances.max() + 1e-6])
+def select_distance_threshold(
+    distances, confidence, rows, known, confidence_threshold
+):
+    positive = np.asarray([
+        row["label"] in known for row in rows
+    ])
+
+    if not positive.any():
+        raise ValueError("validation requires known samples")
+
+    # With no auxiliary unknown samples, use the 95th percentile
+    # of known validation distances as a known-only fallback.
+    if positive.all():
+        return float(np.quantile(distances[positive], 0.95))
+
+    candidates = np.unique(
+        np.r_[
+            np.quantile(distances, np.linspace(0, 1, 101)),
+            distances.max() + 1e-6
+        ]
+    )
+
     scores = []
+
     for limit in candidates:
-        accepted = (confidence >= confidence_threshold) & (distances <= limit)
-        scores.append((0.5 * (accepted[positive].mean() + (~accepted[~positive]).mean()),
-                       accepted[positive].mean(), -float(limit), float(limit)))
+        accepted = (
+            (confidence >= confidence_threshold)
+            & (distances <= limit)
+        )
+
+        scores.append((
+            0.5 * (
+                accepted[positive].mean()
+                + (~accepted[~positive]).mean()
+            ),
+            accepted[positive].mean(),
+            -float(limit),
+            float(limit)
+        ))
+
     return max(scores)[-1]
 
 
@@ -100,12 +203,30 @@ def run(args):
     rows = read_jsonl(args.input)
     source = feature_source(rows)
     if source == "app_message_v1":
-        raise ValueError("application telemetry uses message-count proxies; this research model requires synthetic_flow_v1 or pcap_packet_v1")
-    if args.splits:
+        raise ValueError(
+            "application telemetry uses message-count proxies and is not "
+            "supported by this research model"
+        )
+    if args.model == "directional" and source != "iot23_zeek_v1":
+        raise ValueError(
+            "--model directional requires data imported from IoT-23 "
+            "(feature_source=iot23_zeek_v1)"
+        )
+    if args.split_mode == "flow":
+        if args.splits:
+            raise ValueError("--splits cannot be combined with --split-mode flow")
+        train, valid, test, categories = split_flows(
+            rows, known, aux, heldout, args.seed
+        )
+    elif args.splits:
         assignments = json.loads(Path(args.splits).read_text())
-        train, valid, test, categories = split_assigned(rows, known, aux, heldout, assignments)
+        train, valid, test, categories = split_assigned(
+            rows, known, aux, heldout, assignments
+        )
     else:
-        train, valid, test, categories = split_rows(rows, known, aux, heldout, args.seed)
+        train, valid, test, categories = split_rows(
+            rows, known, aux, heldout, args.seed
+        )
     # Deterministic mixed batches: never group evaluation batches by label or capture.
     rng = random.Random(args.seed)
     for part in (train, valid, test):
@@ -118,8 +239,19 @@ def run(args):
     families = sorted(set(families_by_class.values()) - {"benign"})
     if not families:
         raise ValueError("at least one known attack family is required for hierarchical novelty")
-    model = PayloadGraphIDS(len(FEATURES), len(classes), len(families), args.branch, args.graph)
-    device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
+    if args.model == "directional":
+        model = DirectionalPayloadGraphIDS(
+            len(FEATURES), len(classes), len(families), args.graph
+        )
+    else:
+        model = PayloadGraphIDS(
+            len(FEATURES), len(classes), len(families),
+            args.branch, args.graph
+        )
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
+    )
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.BCEWithLogitsLoss()
@@ -129,7 +261,9 @@ def run(args):
         losses = []
         for start in range(0, len(train), args.batch_size):
             batch = [train[int(i)] for i in order[start : start + args.batch_size]]
-            s, p, m, _ = matrices(batch, args.payload_len, scaler)
+            inputs = model_inputs(
+                batch, args.payload_len, scaler, args.model
+            )
             targets = torch.zeros((len(batch), len(classes)), device=device)
             family_targets = torch.zeros((len(batch), len(families)), device=device)
             for i, r in enumerate(batch):
@@ -138,26 +272,48 @@ def run(args):
                     if r["family"] in families:
                         family_targets[i, families.index(r["family"])] = 1
             optimizer.zero_grad()
-            logits, family_logits, _ = model(torch.from_numpy(s).to(device), torch.from_numpy(p).to(device), torch.from_numpy(m).to(device))
+            logits, family_logits, _ = forward_model(
+                model, inputs, device
+            )
             loss = criterion(logits, targets) + 0.3 * criterion(family_logits, family_targets)
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
         print(f"epoch {epoch + 1}/{args.epochs} loss={np.mean(losses):.4f}")
 
-    train_prob, _, train_embeddings = predict_batches(model, train_known, scaler, args.payload_len, args.batch_size, device)
+    train_prob, _, train_embeddings = predict_batches(model, train_known, scaler, args.payload_len, args.batch_size, device, args.model)
     emb_center = train_embeddings.mean(axis=0)
     emb_scale = train_embeddings.std(axis=0)
     emb_scale = np.maximum(emb_scale, 1e-3)
     normalized_train = (train_embeddings - emb_center) / emb_scale
     prototypes = np.stack([normalized_train[[r["label"] == c for r in train_known]].mean(axis=0) for c in classes])
-    val_prob, val_family, val_embeddings = predict_batches(model, valid, scaler, args.payload_len, args.batch_size, device)
+    val_prob, val_family, val_embeddings = predict_batches(model, valid, scaler, args.payload_len, args.batch_size, device, args.model)
     threshold = select_threshold(val_prob, valid, known, aux)
     val_confidence = val_prob.max(axis=1)
     val_distance = prototype_distance(val_embeddings, val_prob.argmax(axis=1), emb_center, emb_scale, prototypes)
     distance_threshold = select_distance_threshold(val_distance, val_confidence, valid, known, threshold)
-    family_threshold = select_threshold(val_family, valid, [k for k in known if k != "benign"], aux)
-    prob, family_prob, embeddings = predict_batches(model, test, scaler, args.payload_len, args.batch_size, device)
+    family_known = [label for label in known if label != "benign"]
+    validation_family_rows = [
+        row for row in valid
+        if row["label"] in family_known
+    ]
+
+    if validation_family_rows:
+        family_indices = [
+            index for index, row in enumerate(valid)
+            if row["label"] in family_known or row["label"] in aux
+        ]
+        family_threshold = select_threshold(
+            val_family[family_indices],
+            [valid[index] for index in family_indices],
+            family_known,
+            aux
+        )
+    else:
+        # No known attack-family examples exist in this validation capture.
+        # Use the neutral fallback rather than calibrating on absent classes.
+        family_threshold = 0.5
+    prob, family_prob, embeddings = predict_batches(model, test, scaler, args.payload_len, args.batch_size, device, args.model)
     confidence = prob.max(axis=1)
     distance = prototype_distance(embeddings, prob.argmax(axis=1), emb_center, emb_scale, prototypes)
     accepted = (confidence >= threshold) & ((distance <= distance_threshold) if args.decision == "hybrid" else True)
@@ -184,21 +340,41 @@ def run(args):
                        if rejected_true_unknown else None),
                    threshold=threshold, family_threshold=family_threshold, n_train=len(train), n_validation=len(valid),
                    n_aux_train=sum(r["label"] in aux for r in train),
-                   note="Synthetic input does not establish real-world attack detection." if all(r["capture_id"].startswith("sim-") for r in rows) else "Evaluate capture provenance and dataset leakage.")
+                   note=(
+                       "Flow-level split: flows from the same capture may occur in multiple partitions; "
+                       "results are exploratory and not capture-independent."
+                       if args.split_mode == "flow"
+                       else (
+                           "Synthetic input does not establish real-world attack detection."
+                           if all(r["capture_id"].startswith("sim-") for r in rows)
+                           else "Evaluate capture provenance and dataset leakage."
+                       )
+                   ))
 
     output = Path(args.out)
     output.mkdir(parents=True, exist_ok=True)
     joblib.dump(scaler, output / "scaler.joblib")
     torch.save(model.state_dict(), output / "model.pt")
     np.savez(output / "prototypes.npz", center=emb_center, scale=emb_scale, centroids=prototypes)
-    config = dict(classes=classes, families=families, aux=aux, heldout=heldout, categories=categories, branch=args.branch,
+    config = dict(classes=classes, families=families, aux=aux, heldout=heldout, categories=categories,
+                  model_type=args.model, branch=args.branch, split_mode=args.split_mode,
                   graph=args.graph, payload_len=args.payload_len, batch_size=args.batch_size, seed=args.seed,
                   features=FEATURES, feature_source=source, decision=args.decision)
     (output / "config.json").write_text(json.dumps(config, indent=2))
     (output / "split_report.json").write_text(json.dumps({
-        name: dict(flows=len(part), captures=sorted({r["capture_id"] for r in part}),
-                   labels={label: sum(r["label"] == label for r in part) for label in sorted(set(known + aux + heldout))})
-        for name, part in (("train", train), ("validation", valid), ("test", test))
+        "split_mode": args.split_mode,
+        "capture_independent": args.split_mode != "flow",
+        "partitions": {
+            name: dict(
+                flows=len(part),
+                captures=sorted({r["capture_id"] for r in part}),
+                labels={
+                    label: sum(r["label"] == label for r in part)
+                    for label in sorted(set(known + aux + heldout))
+                }
+            )
+            for name, part in (("train", train), ("validation", valid), ("test", test))
+        }
     }, indent=2))
     (output / "metrics.json").write_text(json.dumps(metrics, indent=2))
     table = pd.DataFrame([dict(flow_id=r["flow_id"], capture_id=r["capture_id"], timestamp=r.get("timestamp", ""),
@@ -237,8 +413,16 @@ def main():
     parser.add_argument("--aux", default=",".join(DEFAULT_AUX))
     parser.add_argument("--heldout", default=",".join(DEFAULT_HELDOUT))
     parser.add_argument("--splits", help="JSON capture-ID assignments for train/validation/test; required for mixed-label captures")
+    parser.add_argument(
+        "--split-mode",
+        choices=("capture", "flow"),
+        default="capture",
+        help="capture keeps captures separate; flow stratifies individual flows and may leak capture-specific patterns"
+    )
     parser.add_argument("--benign-exposure-hours", type=float, help="independently measured benign test exposure")
     parser.add_argument("--benign-device-count", type=int, default=1)
+    parser.add_argument("--model", choices=("baseline", "directional"), default="baseline",
+                        help="baseline uses combined payload; directional uses separate IoT-23 directions")
     parser.add_argument("--branch", choices=("both", "stats", "payload"), default="both")
     parser.add_argument("--decision", choices=("sigmoid", "hybrid"), default="hybrid")
     parser.add_argument("--graph", action=argparse.BooleanOptionalAction, default=True)
