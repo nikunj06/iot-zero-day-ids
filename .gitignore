@@ -5,3 +5,11 @@ runs/
 *.pcap
 *.pcapng
 .env
+# Local IoT-23 dataset files (do not commit raw or generated data)
+datasets/iot23/*.pcap
+datasets/iot23/*.pcapng
+datasets/iot23/*.labeled
+datasets/iot23/*.labeled.txt
+datasets/iot23/flows*.jsonl
+datasets/iot23/*.audit.json
+datasets/iot23/torii_test.jsonl

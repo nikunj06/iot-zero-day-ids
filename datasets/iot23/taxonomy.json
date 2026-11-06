@@ -1,0 +1,26 @@
+{
+    "Benign": {
+        "label": "benign",
+        "family": "benign"
+    },
+    "C&C": {
+        "label": "C&C",
+        "family": "C&C"
+    },
+    "DDoS": {
+        "label": "DDoS",
+        "family": "DDoS"
+    },
+    "PartOfAHorizontalPortScan": {
+        "label": "PortScan",
+        "family": "Recon"
+    },
+    "C&C-Torii": {
+        "label": "C&C",
+        "family": "C&C"
+    },
+    "-": {
+        "label": "benign",
+        "family": "benign"
+    }
+}

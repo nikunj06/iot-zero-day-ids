@@ -1,0 +1,6 @@
+
+{
+    "train": ["mirai_34_1", "hakai_8_1"],
+    "validation": ["philips_hue"],
+    "test": ["torii_20_1"]
+}
